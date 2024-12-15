@@ -1,7 +1,22 @@
 #include <driver/i2s.h>
-#include <arduinoFFT.h>
-
+#include <arduinoFFT.h>   // v2.04 ArduinoFFT by Enrique Condes
 #include <SSD1306Wire.h>  // v4.6.1  specific version for esp32 https://github.com/ThingPulse/esp8266-oled-ssd1306
+
+// Audio spectrum display on EPS32 Heltec WifiKit oled
+
+// uses an INMP441 module
+
+// Wiring up the INMP441
+// INMP441	ESP32	Info
+// VDD	    3v3	  Power - DO NOT USE 5V!
+// GND	    GND	  GND
+// L/R	    GND	  Left channel or right channel
+// WS	      22	  Left right clock
+// SCK	    26	  Serial clock
+// SD	      21	  Serial data
+// see https://github.com/atomic14/esp32-i2s-mic-test
+// see https://invensense.tdk.com/wp-content/uploads/2015/02/INMP441.pdf
+
 
 
 // you shouldn't need to change these settings
