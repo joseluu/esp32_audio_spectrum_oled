@@ -4,6 +4,11 @@
 #include "freertos/task.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
+#include "esp32-hal-cpu.h"
+#include "soc/rtc.h"
+#include "hal/clk_tree_ll.h"
+#include "esp_private/regi2c_ctrl.h"
+
 #include "esp_check.h"
 #include "sdkconfig.h"
 #include "i2s_example_pins.h"
@@ -33,7 +38,8 @@
 #define EXAMPLE_STD_DIN_IO2         EXAMPLE_I2S_DIN_IO2     // I2S data in io number
 
 // for left channel tie the L/R pin low
-#define I2S_MIC_CHANNEL  I2S_STD_SLOT_RIGHT
+//#define I2S_MIC_CHANNEL  I2S_STD_SLOT_RIGHT
+#define I2S_MIC_CHANNEL  I2S_STD_SLOT_LEFT
 // either wire your microphone to the same pins or change these to match your wiring
 
 #define I2S_MIC_SERIAL_DATA GPIO_NUM_21
@@ -41,7 +47,7 @@
 #define I2S_MIC_SERIAL_CLOCK GPIO_NUM_26
 // you shouldn't need to change these settings
 #define SAMPLE_BUFFER_SIZE 512
-#define SAMPLE_RATE 8000
+#define SAMPLE_RATE 96000
 
 static i2s_chan_handle_t                rx_chan;        // I2S rx channel handler
 
@@ -69,7 +75,33 @@ typedef union {
   } parts;
 } float_cast;
 
+/*
+48000 samplerate, 16 bits, mono -> clock 1MHz
+8000 samplerate, 32 bits, mono -> clock 332KHz
+48000 samplerate, 32 bits, mono -> clock 2MHz
+48000 samplerate, 32 bits, mono -> clock 4MHz
+48000 samplerate, 32 bits, stereo -> clock 2MHz
+*/
 ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, SAMPLE_BUFFER_SIZE, SAMPLE_RATE);
+
+#define I2S_STD_MSB_SLOT_CONFIG_ICS43234(bits_per_sample, mono_or_stereo) { \
+    .data_bit_width = bits_per_sample, \
+    .slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT, \
+    .slot_mode = mono_or_stereo, \
+    .slot_mask = I2S_STD_SLOT_BOTH, \
+    .ws_width = bits_per_sample, \
+    .ws_pol = false, \
+    .bit_shift = false, \
+    .msb_right = (bits_per_sample <= I2S_DATA_BIT_WIDTH_16BIT) ? \
+                true : false, \
+}
+
+#define I2S_STD_CLK_CONFIG_ICS43234(rate) { \
+    .sample_rate_hz = rate, \
+    .clk_src = I2S_CLK_SRC_DEFAULT, \
+    .mclk_multiple = I2S_MCLK_MULTIPLE_256, \
+}
+
 
 static void i2s_example_init_std_simplex(void)
 {
@@ -88,8 +120,8 @@ static void i2s_example_init_std_simplex(void)
      * They can help to specify the slot and clock configurations for initialization or re-configuring */
 
     i2s_std_config_t rx_std_cfg = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .clk_cfg  = I2S_STD_CLK_CONFIG_ICS43234(SAMPLE_RATE),
+        .slot_cfg = I2S_STD_MSB_SLOT_CONFIG_ICS43234(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,    // some codecs may require mclk signal, this example doesn't need it
             .bclk = EXAMPLE_STD_BCLK_IO2,
@@ -125,19 +157,47 @@ void oledSetup(void) {
   oled.display();
 }
 
+
 void setup()
 {
-  // we need serial output for the plotter
-  Serial.begin(115200);
+
   // start up the I2S peripheral
   i2s_example_init_std_simplex();
   ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
   // i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
   // i2s_set_pin(I2S_NUM_0, &i2s_mic_pins);
   oledSetup();
+  // we need serial output for the plotter
+  Serial.begin(115200);
+  Serial.printf("system freq: %d\n", getCpuFrequencyMhz());
+  Serial.printf("xtal freq: %d\n", rtc_clk_xtal_freq_get());
+  rtc_clk_xtal_freq_update(RTC_XTAL_FREQ_26M);
+  Serial.printf("xtal freq: %d\n", rtc_clk_xtal_freq_get());
+  Serial.printf("pll freq: %d\n", clk_ll_bbpll_get_freq_mhz());
+  //REGI2C_WRITE(I2C_BBPLL, I2C_BBPLL_OC_DIV_7_0, 144);
 }
 
-uint32_t raw_samples[SAMPLE_BUFFER_SIZE];
+template<typename T>
+void findMaxY(T *vData, uint_fast16_t length, T *maxY,
+                             uint_fast16_t *index) {
+  *maxY = 0;
+  // A signal with a DC offset produces a spike on bin 0 that should be ignored.
+  // Start the search on bin 1.
+  *index = 1;
+  // If sampling_frequency = 2 * max_frequency in signal,
+  // value would be stored at position samples/2
+  for (uint_fast16_t i = 1; i < length; i++) {
+    if ((vData[i - 1] < vData[i]) && (vData[i] > vData[i + 1])) {
+      if (vData[i] > vData[*index]) {
+        *index = i;
+      }
+    }
+  }
+  *maxY = vData[*index];
+}
+
+
+int32_t raw_samples[SAMPLE_BUFFER_SIZE];
 void loop()
 {
   // read from the I2S device
@@ -149,18 +209,22 @@ void loop()
   float abs_moy = 0.0;
   float moy = 0.0;
   for (int i = 0; i < SAMPLE_BUFFER_SIZE; i++){
-    vReal[i] = (short)(raw_samples[i] & 0xffff); // 16 bit mode
-    //vReal[i] = raw_samples[i] - (0x20000000);
+  //  vReal[i] = (short)(raw_samples[i] & 0xffff); // 16 bit mode
+    raw_samples[i] = raw_samples[i] >> 8;
+    if (raw_samples[i] & 0x400000){
+      raw_samples[i] = raw_samples[i] - 0x800000;
+    }
+    vReal[i] = raw_samples[i];
     sReal[i] = vReal[i];
-    abs_moy += abs(vReal[i]);
     moy += vReal[i];
     vImag[i]=0.0;
   }
-  abs_moy = abs_moy / SAMPLE_BUFFER_SIZE;
   moy = moy / SAMPLE_BUFFER_SIZE;
-  for (int i = 0; i < SAMPLE_BUFFER_SIZE; i++){
+  for (int i=0; i< SAMPLE_BUFFER_SIZE; i++) {
     vReal[i] -= moy;
+    abs_moy += abs(vReal[i]);
   }
+  abs_moy = abs_moy / SAMPLE_BUFFER_SIZE;
   FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);	/* Weigh data */
   float moy2 = 0.0;
   for (int i = 0; i < SAMPLE_BUFFER_SIZE; i++){
@@ -172,8 +236,12 @@ void loop()
   FFT.compute(FFTDirection::Forward); /* Compute FFT */
   FFT.complexToMagnitude(); /* Compute magnitudes */
 
-  float x = FFT.majorPeakParabola();
-  //Serial.printf("abs_moy: %6.2f moy: %6.2f moy2: %6.2f f peak: %5.0f\n", abs_moy, moy, moy2, x);
+  float f = FFT.majorPeakParabola();
+  float maxY;
+  uint_fast16_t indexOfMaxY;
+  findMaxY<float>(vReal,SAMPLE_BUFFER_SIZE/2 +1, &maxY, &indexOfMaxY);
+  float f2 = (indexOfMaxY * SAMPLE_RATE)/SAMPLE_BUFFER_SIZE;
+  Serial.printf("abs_moy: %6.2f moy: %6.2f moy2: %6.2f f peak: %5.0f slot: %d, f: %5.0f\n", abs_moy, moy, moy2, f, indexOfMaxY, f2);
 
   // float_cast d1, d2;
   // d1.f = 1.0f;
@@ -196,31 +264,50 @@ void loop()
       imin = i;
     }
   }
-  float db_value = 50 + log10f_fast(abs_moy) *10;
+  float db_value = log10f_fast(abs_moy) *10;
   float dbn_value = log10f_fast(moy) *10;
-  Serial.printf("abs_moy: %6.2f log10(abs_moy): %6.2f log10(moy): %6.2f min: %6.2f max: %6.2f minsample: %08x %10d maxsample: %08x %9d\n", 
-        abs_moy, db_value, dbn_value, min, max, raw_samples[imin]- (0x20000000), raw_samples[imax]- (0x20000000));
+  //Serial.printf("abs_moy: %6.2f log10(abs_moy): %6.2f log10(moy): %6.2f min: %6.2f max: %6.2f minsample: %08x %10d maxsample: %08x %9d\n", 
+  //      abs_moy, db_value, dbn_value, min, max, raw_samples[imin]- (0x20000000), raw_samples[imax]- (0x20000000));
 
 
-// dump the samples out to the serial channel.
   oled.clear();
-  for (int i = 20; i < samples_read; i+=2)
+  uint16_t spectrum_f_factor=2;
+  for (int i = 0; i < samples_read/2; i+=spectrum_f_factor)
   {
     float m = 0;
-    float vReal_value = (vReal[i]+vReal[i+1])/2;
+    float vReal_value = 0;
+    for (int j=i; j<i+spectrum_f_factor; j++){
+      vReal_value += vReal[j];
+    }
+    vReal_value /= spectrum_f_factor; // mean of the spectrum_f_factor samples
     float vReal_db_value = (-4 + log10f_fast(vReal_value)) *20; // in db, needs offset for  display
-    oled.setPixelColor(i/2, 54 - vReal_db_value, WHITE); //54 - vReal_db_value
+    oled.setPixelColor(i/spectrum_f_factor, 54 - vReal_db_value, WHITE); //54 - vReal_db_value
   }
   oled.drawProgressBar(0 , 60, 128, 4, db_value);
   oled.display();
-  // if (moy > 1.0){
+  static int count=0;
+
   //   Serial.printf("max: %5.2f ", max);
   //   Serial.println("Computed magnitudes:");
-  //   PrintVector(vReal, (samples_read >> 1), SCL_FREQUENCY);
-  //   while(1); /* Run Once */
-  // }
+  // PrintIVector(raw_samples, samples_read, SCL_INDEX);
+  //  while(1); /* Run Once */
+
+  count ++;
 }
 
+void PrintIVector(int32_t *vData, uint16_t bufferSize, uint8_t scaleType)
+{
+  for (uint16_t i = 0; i < bufferSize; i++)
+  {
+    printf("%08x ",vData[i]);
+  }
+  Serial.println();
+  for (uint16_t i = 0; i < bufferSize; i++)
+  {
+    printf("%08d ",vData[i]);
+  }
+  Serial.println();
+}
 
 void PrintVector(float *vData, uint16_t bufferSize, uint8_t scaleType)
 {
