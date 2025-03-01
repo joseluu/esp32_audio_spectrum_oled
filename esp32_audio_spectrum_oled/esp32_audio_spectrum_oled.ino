@@ -11,7 +11,6 @@
 
 #include "esp_check.h"
 #include "sdkconfig.h"
-#include "i2s_example_pins.h"
 #include <arduinoFFT.h>   // v2.04 ArduinoFFT by Enrique Condes
 #include <SSD1306Wire.h>  // v4.6.1  specific version for esp32 https://github.com/ThingPulse/esp8266-oled-ssd1306
 
@@ -31,20 +30,15 @@
 // see https://github.com/atomic14/esp32-i2s-mic-test
 // see https://invensense.tdk.com/wp-content/uploads/2015/02/INMP441.pdf
 
-
-#define EXAMPLE_STD_BCLK_IO2        EXAMPLE_I2S_BCLK_IO2     // I2S bit clock io number
-#define EXAMPLE_STD_WS_IO2          EXAMPLE_I2S_WS_IO2     // I2S word select io number
-#define EXAMPLE_STD_DOUT_IO2        EXAMPLE_I2S_DOUT_IO2     // I2S data out io number
-#define EXAMPLE_STD_DIN_IO2         EXAMPLE_I2S_DIN_IO2     // I2S data in io number
-
 // for left channel tie the L/R pin low
 //#define I2S_MIC_CHANNEL  I2S_STD_SLOT_RIGHT
 #define I2S_MIC_CHANNEL  I2S_STD_SLOT_LEFT
 // either wire your microphone to the same pins or change these to match your wiring
 
-#define I2S_MIC_SERIAL_DATA GPIO_NUM_21
-#define I2S_MIC_LEFT_RIGHT_CLOCK GPIO_NUM_22
-#define I2S_MIC_SERIAL_CLOCK GPIO_NUM_26
+#define I2S_NOTUSED_SERIAL_DATA_OUT       GPIO_NUM_25
+#define I2S_MIC_SERIAL_DATA GPIO_NUM_26 // EXAMPLE_I2S_DIN_IO2
+#define I2S_MIC_WS_LEFT_RIGHT_CLOCK GPIO_NUM_23 // EXAMPLE_I2S_WS_IO2
+#define I2S_MIC_SERIAL_CLOCK GPIO_NUM_22 // EXAMPLE_I2S_BCLK_IO2
 // you shouldn't need to change these settings
 #define SAMPLE_BUFFER_SIZE 512
 #define SAMPLE_RATE 96000
@@ -124,10 +118,10 @@ static void i2s_example_init_std_simplex(void)
         .slot_cfg = I2S_STD_MSB_SLOT_CONFIG_ICS43234(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,    // some codecs may require mclk signal, this example doesn't need it
-            .bclk = EXAMPLE_STD_BCLK_IO2,
-            .ws   = EXAMPLE_STD_WS_IO2,
-            .dout = EXAMPLE_STD_DOUT_IO2,
-            .din  = EXAMPLE_STD_DIN_IO2,
+            .bclk = I2S_MIC_SERIAL_CLOCK,
+            .ws   = I2S_MIC_WS_LEFT_RIGHT_CLOCK,
+            .dout = I2S_NOTUSED_SERIAL_DATA_OUT,
+            .din  = I2S_MIC_SERIAL_DATA,
             .invert_flags = {
                 .mclk_inv = false,
                 .bclk_inv = false,
@@ -174,7 +168,10 @@ void setup()
   rtc_clk_xtal_freq_update(RTC_XTAL_FREQ_26M);
   Serial.printf("xtal freq: %d\n", rtc_clk_xtal_freq_get());
   Serial.printf("pll freq: %d\n", clk_ll_bbpll_get_freq_mhz());
-  //REGI2C_WRITE(I2C_BBPLL, I2C_BBPLL_OC_DIV_7_0, 144);
+  // if i2s clock frequency seems wrong (48000kHz sampling should lead to a 3MHz clock),
+  // make sure the board type is properly selected, 
+  // especially if the board has a 26MHz crystal for instance Heltec Wifi Kit 32
+  //REGI2C_WRITE(I2C_BBPLL, I2C_BBPLL_OC_DIV_7_0, 144); // not useful unless the board has a vastly difference xtal
 }
 
 template<typename T>
